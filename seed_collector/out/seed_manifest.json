@@ -1,0 +1,17 @@
+{
+  "seed_run_id": "de70b2fd-5015-4ef6-a25d-7ca8d3ff081a",
+  "started_at": "2026-01-04T05:06:50.237710+00:00",
+  "finished_at": "2026-01-04T05:08:39.654180+00:00",
+  "input_category_urls": [
+    "https://covernat.co.kr/product/list-woman.html?cate_no=2074"
+  ],
+  "total_list_pages_fetched": 97,
+  "total_detail_urls": 1964,
+  "total_canonical_urls": 888,
+  "failures_count": 0,
+  "output_paths": {
+    "detail_urls": "out/detail_urls.jsonl",
+    "seed_failures": "out/seed_failures.jsonl",
+    "seed_manifest": "out/seed_manifest.json"
+  }
+}

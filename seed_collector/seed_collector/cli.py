@@ -8,11 +8,16 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from bs4 import BeautifulSoup
 
 from .canonicalize import canonicalize_url
-from .category_parser import extract_breadcrumbs, extract_subcategory_links
+from .category_parser import (
+    detect_active_subcategory_label,
+    extract_breadcrumbs,
+    extract_subcategory_links,
+)
 from .extract_links import extract_next_link_from_soup, extract_product_links_from_soup
 from .fetcher import FetchError, Fetcher
 from .jsonl_writer import JsonlWriter
@@ -71,9 +76,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     collect.add_argument(
         "--subcategory-mode",
-        choices=["auto", "off"],
+        choices=["auto", "off", "expand"],
         default="auto",
-        help="Auto-discover subcategories when possible",
+        help="Subcategory discovery: auto, off, or expand",
     )
 
     return parser
@@ -267,10 +272,15 @@ async def collect(args: argparse.Namespace) -> None:
         category_seen: set,
     ) -> int:
         page_new = 0
+        list_cate_no = _get_query_value(list_page_url, "cate_no")
         for candidate in page_result.candidates:
             if stop_event.is_set():
                 break
             result = canonicalize_url(candidate.url, args.platform_hint)
+            if result.platform_hint == "cafe24" and list_cate_no:
+                candidate_cate_no = _get_query_value(candidate.url, "cate_no")
+                if candidate_cate_no and candidate_cate_no != list_cate_no:
+                    continue
             canonical_url = result.canonical_url
             if canonical_url not in category_seen:
                 category_seen.add(canonical_url)
@@ -405,10 +415,37 @@ async def collect(args: argparse.Namespace) -> None:
         except Exception:
             return None
 
-    async def discover_category_targets(input_category_url: str) -> List[CategoryContext]:
-        if args.subcategory_mode == "off":
-            return [CategoryContext(input_category_url, input_category_url, [], None)]
+    def _normalize_label(label: Optional[str]) -> str:
+        if not label:
+            return ""
+        return " ".join(label.lower().split())
 
+    def _is_all_label(label: Optional[str]) -> bool:
+        normalized = _normalize_label(label)
+        return normalized in {"all", "all items", "all products", "all-products"}
+
+    def _normalize_compare_url(url: str) -> str:
+        parsed = urlparse(url)
+        query_pairs = parse_qsl(parsed.query, keep_blank_values=True)
+        filtered = [(k, v) for k, v in query_pairs if k != args.page_param]
+        new_query = urlencode(sorted(filtered, key=lambda item: (item[0], item[1])), doseq=True)
+        normalized = parsed._replace(query=new_query, fragment="")
+        return urlunparse(normalized).rstrip("/")
+
+    def _build_category_path(breadcrumbs: List[str], label: Optional[str]) -> List[str]:
+        path = list(breadcrumbs)
+        if label and (not path or label.lower() != path[-1].lower()):
+            path.append(label)
+        return path
+
+    def _get_query_value(url: str, key: str) -> Optional[str]:
+        parsed = urlparse(url)
+        for k, value in parse_qsl(parsed.query, keep_blank_values=True):
+            if k == key:
+                return value
+        return None
+
+    async def discover_category_targets(input_category_url: str) -> List[CategoryContext]:
         if args.paging_mode in ("auto", "page_param"):
             discovery_url = build_page_url(input_category_url, args.page_param, args.start_page)
         else:
@@ -419,37 +456,52 @@ async def collect(args: argparse.Namespace) -> None:
             return [CategoryContext(input_category_url, input_category_url, [], None)]
 
         breadcrumbs = extract_breadcrumbs(soup)
+        active_label = detect_active_subcategory_label(soup, discovery_url)
         subcategories = extract_subcategory_links(soup, discovery_url)
-        filtered = [
-            item for item in subcategories if item.url.rstrip("/") != input_category_url.rstrip("/")
-        ]
 
-        if filtered:
-            contexts = []
-            for item in filtered:
-                path = list(breadcrumbs)
-                if not path or item.label.lower() != path[-1].lower():
-                    path.append(item.label)
-                leaf = path[-1] if path else None
-                contexts.append(
-                    CategoryContext(
-                        input_category_url=input_category_url,
-                        target_category_url=item.url,
-                        category_path=path,
-                        category_leaf=leaf,
-                    )
+        if args.subcategory_mode == "off":
+            path = _build_category_path(breadcrumbs, active_label)
+            leaf = path[-1] if path else None
+            return [CategoryContext(input_category_url, input_category_url, path, leaf)]
+
+        if not subcategories:
+            path = _build_category_path(breadcrumbs, active_label)
+            leaf = path[-1] if path else None
+            return [CategoryContext(input_category_url, input_category_url, path, leaf)]
+
+        normalized_input = _normalize_compare_url(input_category_url)
+        input_matches_all = any(
+            _is_all_label(item.label) and _normalize_compare_url(item.url) == normalized_input
+            for item in subcategories
+        )
+
+        should_expand = False
+        if args.subcategory_mode == "expand":
+            should_expand = True
+        elif args.subcategory_mode == "auto":
+            if active_label and _is_all_label(active_label):
+                should_expand = True
+            elif input_matches_all:
+                should_expand = True
+
+        if not should_expand:
+            path = _build_category_path(breadcrumbs, active_label)
+            leaf = path[-1] if path else None
+            return [CategoryContext(input_category_url, input_category_url, path, leaf)]
+
+        contexts = []
+        for item in subcategories:
+            path = _build_category_path(breadcrumbs, item.label)
+            leaf = path[-1] if path else None
+            contexts.append(
+                CategoryContext(
+                    input_category_url=input_category_url,
+                    target_category_url=item.url,
+                    category_path=path,
+                    category_leaf=leaf,
                 )
-            return contexts
-
-        leaf = breadcrumbs[-1] if breadcrumbs else None
-        return [
-            CategoryContext(
-                input_category_url=input_category_url,
-                target_category_url=input_category_url,
-                category_path=breadcrumbs,
-                category_leaf=leaf,
             )
-        ]
+        return contexts
 
     async def process_category(context: CategoryContext) -> None:
         if stop_event.is_set():

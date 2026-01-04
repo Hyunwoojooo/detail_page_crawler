@@ -79,7 +79,7 @@ seed-collector collect \
   --subcategory-mode auto
 ```
 
-### Covernat example
+### Covernat examples
 
 ```bash
 seed-collector collect \
@@ -87,7 +87,19 @@ seed-collector collect \
   --out-dir ./out \
   --paging-mode page_param \
   --page-param page \
-  --subcategory-mode auto
+  --subcategory-mode expand
+```
+
+Narrow to specific subcategories (no expansion):
+
+```bash
+seed-collector collect \
+  --category-url "https://covernat.co.kr/product/list.html?cate_no=2044" \
+  --category-url "https://covernat.co.kr/product/list.html?cate_no=3487" \
+  --out-dir ./out \
+  --paging-mode page_param \
+  --page-param page \
+  --subcategory-mode off
 ```
 
 ## OS-specific usage
@@ -149,7 +161,7 @@ seed-collector collect \
   --page-param page \
   --start-page 1 \
   --platform-hint auto|cafe24|shopify|custom_php|unknown \
-  --subcategory-mode auto|off
+  --subcategory-mode auto|off|expand
 ```
 
 Defaults:
@@ -180,10 +192,14 @@ Stops when:
 
 When `--subcategory-mode auto` is enabled:
 - The crawler inspects the first list page and extracts subcategory links.
-- Each subcategory is crawled as its own target.
-- Output includes `category_target_url`, `category_path`, and `category_leaf`.
+- It expands to subcategories only when the current page looks like an \"All\" category.
+- Otherwise it treats the input category URL as a leaf and crawls only that page.
 
-If no subcategories are found, it falls back to crawling the input category URL as-is.
+Other modes:
+- `off`: never expand subcategories; crawl only the input category URLs.
+- `expand`: always expand to subcategory links if found.
+
+Output includes `category_target_url`, `category_path`, and `category_leaf` when breadcrumbs and tabs are detected.
 
 ## Link extraction rules
 
@@ -192,6 +208,13 @@ From each list page HTML:
 - Keep only likely product detail URLs (Cafe24/Shopify/custom PHP/generic)
 - Convert relative URLs to absolute
 - Deduplicate by `canonical_url`
+
+Cafe24 extra filtering:
+- If the list page URL includes `cate_no`, detail links with a different `cate_no` are ignored.
+  This avoids picking up global ranking widgets that are not part of the current category.
+- For Cafe24, link extraction is scoped to the main list containers (for example,
+  `.xans-product-listnormal`, `.xans-product-normalpackage`, `.xans-product-listcategory`).
+  Ranking sliders like `menu-ranking` or `listmain` are excluded.
 
 ## Canonicalization rules
 
@@ -236,6 +259,25 @@ Optional:
 - `http_status`
 - `notes`
 
+Key meanings:
+
+- `seed_run_id`: unique ID for the current run
+- `shop_base_url`: base URL for the shop (scheme + host)
+- `platform_hint`: detected platform (`cafe24`, `shopify`, `custom_php`, `unknown`)
+- `category_url`: input category URL as provided by the user
+- `category_target_url`: actual category URL crawled (can differ when subcategories expand)
+- `category_path`: breadcrumb path if detected (example: `["WOMAN","APPAREL","Down"]`)
+- `category_leaf`: last item of `category_path` if available
+- `list_page_url`: actual list page URL fetched (includes page param)
+- `discovery_method`: discovery source (`category_list`)
+- `discovered_at`: ISO 8601 UTC timestamp
+- `detail_url`: raw detail link found on the list page
+- `canonical_url`: normalized canonical URL used for dedupe
+- `external_product_id`: product ID extracted from the URL (if present)
+- `anchor_text`: link text if available
+- `http_status`: HTTP status of the list page
+- `notes`: extra notes list
+
 Example line:
 
 ```json
@@ -252,6 +294,17 @@ Example line:
 - `message`
 - `status_code`
 - `created_at`
+
+Key meanings:
+
+- `seed_run_id`: unique ID for the current run
+- `category_url`: input category URL
+- `category_target_url`: actual category URL crawled
+- `list_page_url`: list page URL where failure happened
+- `failure_category`: failure type
+- `message`: error detail
+- `status_code`: HTTP status if available
+- `created_at`: ISO 8601 UTC timestamp
 
 Failure categories:
 - `FETCH_FAILED`
@@ -272,6 +325,18 @@ Failure categories:
 - `failures_count`
 - `output_paths`
 
+Key meanings:
+
+- `seed_run_id`: unique ID for the current run
+- `started_at`: ISO 8601 UTC start time
+- `finished_at`: ISO 8601 UTC finish time
+- `input_category_urls`: list of input category URLs
+- `total_list_pages_fetched`: total list pages requested
+- `total_detail_urls`: total raw detail links found
+- `total_canonical_urls`: total unique canonical URLs
+- `failures_count`: number of failures
+- `output_paths`: output file paths
+
 ## Troubleshooting
 
 ### Permission errors with pip install -e
@@ -291,6 +356,7 @@ If your environment disables user site-packages, `pip install -e .` may fail unl
 ### Some non-product links still appear
 
 Heuristics are best-effort. Provide a few example URLs and the target site, and we can tighten the rules.
+For Cafe24, if a site uses custom list containers, update the selectors in `seed_collector/seed_collector/extract_links.py`.
 
 ## Tests
 

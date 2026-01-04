@@ -27,6 +27,13 @@ GENERIC_PATH_EXCLUDE = (
     "/product/brand",
 )
 
+CAFE24_LIST_SELECTORS = (
+    ".xans-product-listnormal",
+    ".xans-product-normalpackage",
+    ".xans-product-listcategory",
+)
+CAFE24_EXCLUDE_ANCESTOR_HINTS = ("menu-ranking", "listmain", "swiper")
+
 
 @dataclass(frozen=True)
 class LinkCandidate:
@@ -44,30 +51,8 @@ def extract_product_links_from_soup(
     base_url: str,
     platform_hint: str,
 ) -> List[LinkCandidate]:
-    seen = set()
-    candidates: List[LinkCandidate] = []
-
-    for anchor in soup.find_all("a", href=True):
-        href = anchor.get("href")
-        if not href:
-            continue
-        href = href.strip()
-        if _is_skippable_href(href):
-            continue
-
-        absolute = urljoin(base_url, href)
-        matched_platform = classify_product_url(absolute)
-        if not _is_allowed_platform(matched_platform, platform_hint):
-            continue
-
-        if absolute in seen:
-            continue
-        seen.add(absolute)
-
-        text = anchor.get_text(" ", strip=True) or None
-        candidates.append(LinkCandidate(url=absolute, anchor_text=text))
-
-    return candidates
+    roots = _select_anchor_roots(soup, platform_hint)
+    return _extract_links_from_roots(roots, base_url, platform_hint)
 
 
 def extract_next_link(html: str, base_url: str) -> Optional[str]:
@@ -101,6 +86,74 @@ def extract_next_link_from_soup(soup: BeautifulSoup, base_url: str) -> Optional[
             return urljoin(base_url, href)
 
     return None
+
+
+def _select_anchor_roots(soup: BeautifulSoup, platform_hint: str) -> List[BeautifulSoup]:
+    if platform_hint in ("cafe24", "auto"):
+        roots = _find_cafe24_list_roots(soup)
+        if roots:
+            return roots
+    return [soup]
+
+
+def _find_cafe24_list_roots(soup: BeautifulSoup) -> List[BeautifulSoup]:
+    roots: List[BeautifulSoup] = []
+    for selector in CAFE24_LIST_SELECTORS:
+        roots.extend(soup.select(selector))
+    if roots:
+        return roots
+
+    for node in soup.find_all(class_=lambda v: v and "prdList" in v):
+        if _has_ancestor_class(node, CAFE24_EXCLUDE_ANCESTOR_HINTS):
+            continue
+        roots.append(node)
+    return roots
+
+
+def _has_ancestor_class(node: BeautifulSoup, hints: tuple) -> bool:
+    current = node
+    while current is not None:
+        classes = current.get("class", [])
+        if classes:
+            joined = " ".join(classes).lower()
+            if any(hint in joined for hint in hints):
+                return True
+        current = current.parent
+        if not hasattr(current, "get"):
+            break
+    return False
+
+
+def _extract_links_from_roots(
+    roots: List[BeautifulSoup],
+    base_url: str,
+    platform_hint: str,
+) -> List[LinkCandidate]:
+    seen = set()
+    candidates: List[LinkCandidate] = []
+
+    for root in roots:
+        for anchor in root.find_all("a", href=True):
+            href = anchor.get("href")
+            if not href:
+                continue
+            href = href.strip()
+            if _is_skippable_href(href):
+                continue
+
+            absolute = urljoin(base_url, href)
+            matched_platform = classify_product_url(absolute)
+            if not _is_allowed_platform(matched_platform, platform_hint):
+                continue
+
+            if absolute in seen:
+                continue
+            seen.add(absolute)
+
+            text = anchor.get_text(" ", strip=True) or None
+            candidates.append(LinkCandidate(url=absolute, anchor_text=text))
+
+    return candidates
 
 
 def classify_product_url(url: str) -> Optional[str]:
